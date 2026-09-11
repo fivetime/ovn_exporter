@@ -88,6 +88,26 @@ This exporter collects metrics from the following OVN components:
 - All dependencies updated to latest versions
 - Fixed deprecated Prometheus APIs
 
+## Collector selection
+
+`-collector.components` (default: `ovsdb-server-southbound,ovsdb-server-northbound,ovn-northd`) selects
+the daemons probed through their local control sockets, pid and log files. Those probes only work when
+the exporter runs next to the daemon. Set it to an empty value when the exporter reaches the databases
+over the network, otherwise every poll fails the local probes and `ovn_up` stays at 0:
+
+```bash
+ovn_exporter \
+  -database.northbound.socket.remote=10.0.0.10:6641 \
+  -database.southbound.socket.remote=10.0.0.10:6642 \
+  -collector.components=
+```
+
+Remote addresses are plain `host:port`; a `tcp:` prefix is not accepted.
+
+`-collector.topology` (default: `true`) queries the NB/SB tables for chassis, logical switch, logical
+router and port binding metrics. Disable it on exporters that run next to each database replica so the
+topology series are exported only once.
+
 ## Installation
 
 ### Pre-built Binaries

@@ -14,10 +14,46 @@
 
 package ovn_exporter
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestNewExporter(t *testing.T) {
 	if _, err := NewExporter(Options{}); err != nil {
 		t.Errorf("expected no error, but got %q", err)
+	}
+}
+
+func TestParseComponents(t *testing.T) {
+	got, err := ParseComponents("")
+	if err != nil || len(got) != 0 {
+		t.Fatalf("empty list: got %v, %v; want no components", got, err)
+	}
+
+	got, err = ParseComponents(" ovn-northd , ovsdb-server-northbound,ovn-northd ")
+	if err != nil {
+		t.Fatalf("valid list: unexpected error %v", err)
+	}
+	if want := []string{"ovn-northd", "ovsdb-server-northbound"}; !slices.Equal(got, want) {
+		t.Fatalf("valid list: got %v, want %v", got, want)
+	}
+
+	if _, err := ParseComponents("ovs-vswitchd"); err == nil {
+		t.Fatal("unsupported component: want an error")
+	}
+}
+
+func TestEnabledComponents(t *testing.T) {
+	e := &Exporter{}
+	e.SetComponents([]string{"ovn-northd", "ovsdb-server-northbound"})
+	got := e.enabledComponents(DefaultComponents...)
+	if want := []string{"ovsdb-server-northbound", "ovn-northd"}; !slices.Equal(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+
+	e.SetComponents(nil)
+	if got := e.enabledComponents(DefaultComponents...); len(got) != 0 {
+		t.Fatalf("no components selected: got %v", got)
 	}
 }

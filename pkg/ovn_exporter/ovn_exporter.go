@@ -17,6 +17,8 @@ package ovn_exporter
 import (
 	"fmt"
 	"os"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -343,6 +345,8 @@ type Exporter struct {
 	nextCollectionTicker int64
 	metrics              []prometheus.Metric
 	logger               log.Logger
+	components           []string
+	collectTopology      bool
 }
 
 type Options struct {
@@ -382,8 +386,10 @@ func NewExporter(opts Options) (*Exporter, error) {
 	version.BuildUser = buildUser
 	version.BuildDate = buildDate
 	e := Exporter{
-		timeout: opts.Timeout,
-		logger:  opts.Logger,
+		timeout:         opts.Timeout,
+		logger:          opts.Logger,
+		components:      append([]string(nil), DefaultComponents...),
+		collectTopology: true,
 	}
 	client := ovsdb.NewOvnClient()
 	client.Timeout = opts.Timeout
@@ -605,11 +611,11 @@ func (e *Exporter) GatherMetrics() {
 		)
 	}
 
-	components := []string{
+	components := e.enabledComponents(
 		"ovsdb-server-southbound",
 		"ovsdb-server-northbound",
 		"ovn-northd",
-	}
+	)
 	for _, component := range components {
 		level.Debug(e.logger).Log(
 			"msg", "GatherMetrics() calls GetProcessInfo()",
@@ -635,11 +641,11 @@ func (e *Exporter) GatherMetrics() {
 		)
 	}
 
-	components = []string{
+	components = e.enabledComponents(
 		"ovsdb-server-southbound",
 		"ovsdb-server-northbound",
 		"ovn-northd",
-	}
+	)
 	for _, component := range components {
 		level.Debug(e.logger).Log(
 			"msg", "GatherMetrics() calls GetLogFileInfo()",
@@ -710,349 +716,351 @@ func (e *Exporter) GatherMetrics() {
 		}
 	}
 
-	level.Debug(e.logger).Log(
-		"msg", "GatherMetrics() calls GetChassis()",
-		"system_id", e.Client.System.ID,
-	)
-	chassisNameByUUID := map[string]string{}
-	if vteps, err := e.Client.GetChassis(); err != nil {
-		level.Error(e.logger).Log(
-			"msg", "GetChassis() failed",
-			"southbound_db_name", e.Client.Database.Southbound.Name,
+	if e.collectTopology {
+		level.Debug(e.logger).Log(
+			"msg", "GatherMetrics() calls GetChassis()",
 			"system_id", e.Client.System.ID,
-			"error", err.Error(),
 		)
-		e.IncrementErrorCounter()
-		upValue = 0
-	} else {
-		e.IncrementSuccessCounter()
-		for _, vtep := range vteps {
-			chassisNameByUUID[vtep.UUID] = vtep.Name
-			e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
-				chassisInfo,
-				prometheus.GaugeValue,
-				float64(vtep.NbCfgTimestamp),
-				e.Client.System.ID,
-				vtep.UUID,
-				vtep.Name,
-				vtep.IPAddress.String(),
-			))
-			e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
-				chassisNbCfg,
-				prometheus.GaugeValue,
-				float64(vtep.NbCfg),
-				e.Client.System.ID,
-				vtep.UUID,
-				vtep.Name,
-				vtep.IPAddress.String(),
-			))
-		}
-	}
-	level.Debug(e.logger).Log(
-		"msg", "GatherMetrics() completed GetChassis()",
-		"system_id", e.Client.System.ID,
-	)
-
-	level.Debug(e.logger).Log(
-		"msg", "GatherMetrics() calls GetLogicalSwitches()",
-		"system_id", e.Client.System.ID,
-	)
-	lsws, err := e.Client.GetLogicalSwitches()
-	if err != nil {
-		level.Error(e.logger).Log(
-			"msg", "GetLogicalSwitches() failed",
-			"southbound_db_name", e.Client.Database.Southbound.Name,
-			"system_id", e.Client.System.ID,
-			"error", err.Error(),
-		)
-		e.IncrementErrorCounter()
-		upValue = 0
-	} else {
-		e.IncrementSuccessCounter()
-		for _, lsw := range lsws {
-			e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
-				logicalSwitchInfo,
-				prometheus.GaugeValue,
-				1,
-				e.Client.System.ID,
-				lsw.UUID,
-				lsw.Name,
-			))
-			e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
-				logicalSwitchPorts,
-				prometheus.GaugeValue,
-				float64(len(lsw.Ports)),
-				e.Client.System.ID,
-				lsw.UUID,
-			))
-			if len(lsw.Ports) > 0 {
-				for _, p := range lsw.Ports {
-					e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
-						logicalSwitchPortBinding,
-						prometheus.GaugeValue,
-						1,
-						e.Client.System.ID,
-						lsw.UUID,
-						p,
-					))
-				}
-			}
-			if len(lsw.ExternalIDs) > 0 {
-				for k, v := range lsw.ExternalIDs {
-					e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
-						logicalSwitchExternalIDs,
-						prometheus.GaugeValue,
-						1,
-						e.Client.System.ID,
-						lsw.UUID,
-						k,
-						v,
-					))
-				}
-			}
-			e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
-				logicalSwitchTunnelKey,
-				prometheus.GaugeValue,
-				float64(lsw.TunnelKey),
-				e.Client.System.ID,
-				lsw.UUID,
-			))
-		}
-	}
-	level.Debug(e.logger).Log(
-		"msg", "GatherMetrics() completed GetLogicalSwitches()",
-		"system_id", e.Client.System.ID,
-	)
-
-	level.Debug(e.logger).Log(
-		"msg", "GatherMetrics() calls GetLogicalSwitchPorts()",
-		"system_id", e.Client.System.ID,
-	)
-	lswps, err := e.Client.GetLogicalSwitchPorts()
-	if err != nil {
-		level.Error(e.logger).Log(
-			"msg", "GetLogicalSwitchPorts() failed",
-			"southbound_db_name", e.Client.Database.Southbound.Name,
-			"system_id", e.Client.System.ID,
-			"error", err.Error(),
-		)
-		e.IncrementErrorCounter()
-		upValue = 0
-	} else {
-		e.IncrementSuccessCounter()
-		for _, port := range lswps {
-			macAddr := "<nil>"
-			ipAddr := "<nil>"
-
-			// Find first MAC address
-			for _, a := range port.Addresses {
-				if a.MacAddress != nil {
-					macAddr = a.MacAddress.String()
-					break
-				}
-			}
-
-			// Find first IP address
-			for _, a := range port.Addresses {
-				if len(a.IPAddresses) > 0 {
-					ipAddr = a.IPAddresses[0].String()
-					break
-				}
-			}
-
-			e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
-				logicalSwitchPortInfo,
-				prometheus.GaugeValue,
-				float64(1),
-				e.Client.System.ID,
-				port.UUID,
-				port.Name,
-				port.ChassisUUID,
-				port.LogicalSwitchName,
-				port.DatapathUUID,
-				port.PortBindingUUID,
-				macAddr,
-				ipAddr,
-			))
-			e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
-				logicalSwitchPortTunnelKey,
-				prometheus.GaugeValue,
-				float64(port.TunnelKey),
-				e.Client.System.ID,
-				port.UUID,
-			))
-		}
-	}
-	level.Debug(e.logger).Log(
-		"msg", "GatherMetrics() completed GetLogicalSwitchPorts()",
-		"system_id", e.Client.System.ID,
-	)
-
-	// Gather Port_Binding metrics (chassis-level distribution of all binding
-	// types, plus drill-down info for chassis-pinned gateway ports).
-	level.Debug(e.logger).Log(
-		"msg", "GatherMetrics() calls GetPortBindings()",
-		"system_id", e.Client.System.ID,
-	)
-	pbs, err := e.Client.GetPortBindings()
-	if err != nil {
-		level.Error(e.logger).Log(
-			"msg", "GetPortBindings() failed",
-			"southbound_db_name", e.Client.Database.Southbound.Name,
-			"system_id", e.Client.System.ID,
-			"error", err.Error(),
-		)
-		e.IncrementErrorCounter()
-		upValue = 0
-	} else {
-		e.IncrementSuccessCounter()
-		pbCounts := make(map[[3]string]int)
-		for _, pb := range pbs {
-			chassisLabel := pb.ChassisUUID
-			chassisName := chassisNameByUUID[pb.ChassisUUID]
-			if chassisLabel == "" {
-				chassisLabel = "unbound"
-			}
-			typeLabel := pb.Type
-			if typeLabel == "" {
-				typeLabel = "vif"
-			}
-			pbCounts[[3]string{chassisLabel, chassisName, typeLabel}]++
-
-			if pb.Type == "chassisredirect" || pb.Type == "l3gateway" {
+		chassisNameByUUID := map[string]string{}
+		if vteps, err := e.Client.GetChassis(); err != nil {
+			level.Error(e.logger).Log(
+				"msg", "GetChassis() failed",
+				"southbound_db_name", e.Client.Database.Southbound.Name,
+				"system_id", e.Client.System.ID,
+				"error", err.Error(),
+			)
+			e.IncrementErrorCounter()
+			upValue = 0
+		} else {
+			e.IncrementSuccessCounter()
+			for _, vtep := range vteps {
+				chassisNameByUUID[vtep.UUID] = vtep.Name
 				e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
-					gatewayPortInfo,
+					chassisInfo,
 					prometheus.GaugeValue,
-					float64(1),
+					float64(vtep.NbCfgTimestamp),
 					e.Client.System.ID,
-					pb.UUID,
-					pb.ChassisUUID,
-					chassisName,
-					pb.Type,
-					pb.LogicalPort,
-					pb.DatapathUUID,
-					pb.ExternalIDs["neutron:router_name"],
+					vtep.UUID,
+					vtep.Name,
+					vtep.IPAddress.String(),
+				))
+				e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
+					chassisNbCfg,
+					prometheus.GaugeValue,
+					float64(vtep.NbCfg),
+					e.Client.System.ID,
+					vtep.UUID,
+					vtep.Name,
+					vtep.IPAddress.String(),
 				))
 			}
 		}
-		for key, count := range pbCounts {
-			e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
-				portBindingCount,
-				prometheus.GaugeValue,
-				float64(count),
-				e.Client.System.ID,
-				key[0],
-				key[1],
-				key[2],
-			))
-		}
-	}
-	level.Debug(e.logger).Log(
-		"msg", "GatherMetrics() completed GetPortBindings()",
-		"system_id", e.Client.System.ID,
-	)
-
-	// Gather Logical Router metrics
-	level.Debug(e.logger).Log(
-		"msg", "GatherMetrics() calls GetLogicalRouters()",
-		"system_id", e.Client.System.ID,
-	)
-	routers, err := e.GetLogicalRouters()
-	if err != nil {
-		level.Error(e.logger).Log(
-			"msg", "GetLogicalRouters() failed",
-			"northbound_db_name", e.Client.Database.Northbound.Name,
+		level.Debug(e.logger).Log(
+			"msg", "GatherMetrics() completed GetChassis()",
 			"system_id", e.Client.System.ID,
-			"error", err.Error(),
 		)
-		e.IncrementErrorCounter()
-		upValue = 0
-	} else {
-		e.IncrementSuccessCounter()
-		for _, router := range routers {
-			// Basic router info metric
-			e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
-				logicalRouterInfo,
-				prometheus.GaugeValue,
-				1,
-				e.Client.System.ID,
-				router.UUID,
-				router.Name,
-			))
 
-			// Router ports count
-			e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
-				logicalRouterPorts,
-				prometheus.GaugeValue,
-				float64(len(router.Ports)),
-				e.Client.System.ID,
-				router.UUID,
-			))
+		level.Debug(e.logger).Log(
+			"msg", "GatherMetrics() calls GetLogicalSwitches()",
+			"system_id", e.Client.System.ID,
+		)
+		lsws, err := e.Client.GetLogicalSwitches()
+		if err != nil {
+			level.Error(e.logger).Log(
+				"msg", "GetLogicalSwitches() failed",
+				"southbound_db_name", e.Client.Database.Southbound.Name,
+				"system_id", e.Client.System.ID,
+				"error", err.Error(),
+			)
+			e.IncrementErrorCounter()
+			upValue = 0
+		} else {
+			e.IncrementSuccessCounter()
+			for _, lsw := range lsws {
+				e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
+					logicalSwitchInfo,
+					prometheus.GaugeValue,
+					1,
+					e.Client.System.ID,
+					lsw.UUID,
+					lsw.Name,
+				))
+				e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
+					logicalSwitchPorts,
+					prometheus.GaugeValue,
+					float64(len(lsw.Ports)),
+					e.Client.System.ID,
+					lsw.UUID,
+				))
+				if len(lsw.Ports) > 0 {
+					for _, p := range lsw.Ports {
+						e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
+							logicalSwitchPortBinding,
+							prometheus.GaugeValue,
+							1,
+							e.Client.System.ID,
+							lsw.UUID,
+							p,
+						))
+					}
+				}
+				if len(lsw.ExternalIDs) > 0 {
+					for k, v := range lsw.ExternalIDs {
+						e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
+							logicalSwitchExternalIDs,
+							prometheus.GaugeValue,
+							1,
+							e.Client.System.ID,
+							lsw.UUID,
+							k,
+							v,
+						))
+					}
+				}
+				e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
+					logicalSwitchTunnelKey,
+					prometheus.GaugeValue,
+					float64(lsw.TunnelKey),
+					e.Client.System.ID,
+					lsw.UUID,
+				))
+			}
+		}
+		level.Debug(e.logger).Log(
+			"msg", "GatherMetrics() completed GetLogicalSwitches()",
+			"system_id", e.Client.System.ID,
+		)
 
-			// Static routes count
-			e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
-				logicalRouterStaticRoutes,
-				prometheus.GaugeValue,
-				float64(len(router.StaticRoutes)),
-				e.Client.System.ID,
-				router.UUID,
-			))
+		level.Debug(e.logger).Log(
+			"msg", "GatherMetrics() calls GetLogicalSwitchPorts()",
+			"system_id", e.Client.System.ID,
+		)
+		lswps, err := e.Client.GetLogicalSwitchPorts()
+		if err != nil {
+			level.Error(e.logger).Log(
+				"msg", "GetLogicalSwitchPorts() failed",
+				"southbound_db_name", e.Client.Database.Southbound.Name,
+				"system_id", e.Client.System.ID,
+				"error", err.Error(),
+			)
+			e.IncrementErrorCounter()
+			upValue = 0
+		} else {
+			e.IncrementSuccessCounter()
+			for _, port := range lswps {
+				macAddr := "<nil>"
+				ipAddr := "<nil>"
 
-			// NAT rules count
-			e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
-				logicalRouterNatRules,
-				prometheus.GaugeValue,
-				float64(len(router.NAT)),
-				e.Client.System.ID,
-				router.UUID,
-			))
+				// Find first MAC address
+				for _, a := range port.Addresses {
+					if a.MacAddress != nil {
+						macAddr = a.MacAddress.String()
+						break
+					}
+				}
 
-			// Load balancers count
-			e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
-				logicalRouterLoadBalancers,
-				prometheus.GaugeValue,
-				float64(len(router.LoadBalancer)),
-				e.Client.System.ID,
-				router.UUID,
-			))
+				// Find first IP address
+				for _, a := range port.Addresses {
+					if len(a.IPAddresses) > 0 {
+						ipAddr = a.IPAddresses[0].String()
+						break
+					}
+				}
 
-			// Policies count
-			e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
-				logicalRouterPolicies,
-				prometheus.GaugeValue,
-				float64(len(router.Policies)),
-				e.Client.System.ID,
-				router.UUID,
-			))
+				e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
+					logicalSwitchPortInfo,
+					prometheus.GaugeValue,
+					float64(1),
+					e.Client.System.ID,
+					port.UUID,
+					port.Name,
+					port.ChassisUUID,
+					port.LogicalSwitchName,
+					port.DatapathUUID,
+					port.PortBindingUUID,
+					macAddr,
+					ipAddr,
+				))
+				e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
+					logicalSwitchPortTunnelKey,
+					prometheus.GaugeValue,
+					float64(port.TunnelKey),
+					e.Client.System.ID,
+					port.UUID,
+				))
+			}
+		}
+		level.Debug(e.logger).Log(
+			"msg", "GatherMetrics() completed GetLogicalSwitchPorts()",
+			"system_id", e.Client.System.ID,
+		)
 
-			// External IDs
-			if len(router.ExternalIDs) > 0 {
-				for k, v := range router.ExternalIDs {
+		// Gather Port_Binding metrics (chassis-level distribution of all binding
+		// types, plus drill-down info for chassis-pinned gateway ports).
+		level.Debug(e.logger).Log(
+			"msg", "GatherMetrics() calls GetPortBindings()",
+			"system_id", e.Client.System.ID,
+		)
+		pbs, err := e.Client.GetPortBindings()
+		if err != nil {
+			level.Error(e.logger).Log(
+				"msg", "GetPortBindings() failed",
+				"southbound_db_name", e.Client.Database.Southbound.Name,
+				"system_id", e.Client.System.ID,
+				"error", err.Error(),
+			)
+			e.IncrementErrorCounter()
+			upValue = 0
+		} else {
+			e.IncrementSuccessCounter()
+			pbCounts := make(map[[3]string]int)
+			for _, pb := range pbs {
+				chassisLabel := pb.ChassisUUID
+				chassisName := chassisNameByUUID[pb.ChassisUUID]
+				if chassisLabel == "" {
+					chassisLabel = "unbound"
+				}
+				typeLabel := pb.Type
+				if typeLabel == "" {
+					typeLabel = "vif"
+				}
+				pbCounts[[3]string{chassisLabel, chassisName, typeLabel}]++
+
+				if pb.Type == "chassisredirect" || pb.Type == "l3gateway" {
 					e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
-						logicalRouterExternalIDs,
+						gatewayPortInfo,
 						prometheus.GaugeValue,
-						1,
+						float64(1),
 						e.Client.System.ID,
-						router.UUID,
-						k,
-						v,
+						pb.UUID,
+						pb.ChassisUUID,
+						chassisName,
+						pb.Type,
+						pb.LogicalPort,
+						pb.DatapathUUID,
+						pb.ExternalIDs["neutron:router_name"],
 					))
 				}
 			}
+			for key, count := range pbCounts {
+				e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
+					portBindingCount,
+					prometheus.GaugeValue,
+					float64(count),
+					e.Client.System.ID,
+					key[0],
+					key[1],
+					key[2],
+				))
+			}
 		}
+		level.Debug(e.logger).Log(
+			"msg", "GatherMetrics() completed GetPortBindings()",
+			"system_id", e.Client.System.ID,
+		)
+
+		// Gather Logical Router metrics
+		level.Debug(e.logger).Log(
+			"msg", "GatherMetrics() calls GetLogicalRouters()",
+			"system_id", e.Client.System.ID,
+		)
+		routers, err := e.GetLogicalRouters()
+		if err != nil {
+			level.Error(e.logger).Log(
+				"msg", "GetLogicalRouters() failed",
+				"northbound_db_name", e.Client.Database.Northbound.Name,
+				"system_id", e.Client.System.ID,
+				"error", err.Error(),
+			)
+			e.IncrementErrorCounter()
+			upValue = 0
+		} else {
+			e.IncrementSuccessCounter()
+			for _, router := range routers {
+				// Basic router info metric
+				e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
+					logicalRouterInfo,
+					prometheus.GaugeValue,
+					1,
+					e.Client.System.ID,
+					router.UUID,
+					router.Name,
+				))
+
+				// Router ports count
+				e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
+					logicalRouterPorts,
+					prometheus.GaugeValue,
+					float64(len(router.Ports)),
+					e.Client.System.ID,
+					router.UUID,
+				))
+
+				// Static routes count
+				e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
+					logicalRouterStaticRoutes,
+					prometheus.GaugeValue,
+					float64(len(router.StaticRoutes)),
+					e.Client.System.ID,
+					router.UUID,
+				))
+
+				// NAT rules count
+				e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
+					logicalRouterNatRules,
+					prometheus.GaugeValue,
+					float64(len(router.NAT)),
+					e.Client.System.ID,
+					router.UUID,
+				))
+
+				// Load balancers count
+				e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
+					logicalRouterLoadBalancers,
+					prometheus.GaugeValue,
+					float64(len(router.LoadBalancer)),
+					e.Client.System.ID,
+					router.UUID,
+				))
+
+				// Policies count
+				e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
+					logicalRouterPolicies,
+					prometheus.GaugeValue,
+					float64(len(router.Policies)),
+					e.Client.System.ID,
+					router.UUID,
+				))
+
+				// External IDs
+				if len(router.ExternalIDs) > 0 {
+					for k, v := range router.ExternalIDs {
+						e.metrics = append(e.metrics, prometheus.MustNewConstMetric(
+							logicalRouterExternalIDs,
+							prometheus.GaugeValue,
+							1,
+							e.Client.System.ID,
+							router.UUID,
+							k,
+							v,
+						))
+					}
+				}
+			}
+		}
+		level.Debug(e.logger).Log(
+			"msg", "GatherMetrics() completed GetLogicalRouters()",
+			"system_id", e.Client.System.ID,
+		)
 	}
-	level.Debug(e.logger).Log(
-		"msg", "GatherMetrics() completed GetLogicalRouters()",
-		"system_id", e.Client.System.ID,
-	)
 
 	northClusterID := ""
 	southClusterID := ""
 
-	components = []string{
+	components = e.enabledComponents(
 		"ovsdb-server-southbound",
 		"ovsdb-server-northbound",
-	}
+	)
 
 	for _, component := range components {
 		level.Debug(e.logger).Log(
@@ -1392,10 +1400,10 @@ func (e *Exporter) GatherMetrics() {
 		))
 	}
 
-	components = []string{
+	components = e.enabledComponents(
 		"ovsdb-server-southbound",
 		"ovsdb-server-northbound",
-	}
+	)
 
 	for _, component := range components {
 		level.Debug(e.logger).Log(
@@ -1547,14 +1555,14 @@ func (e *Exporter) GatherMetrics() {
 
 // OvnLogicalRouter holds basic information about a logical router
 type OvnLogicalRouter struct {
-	UUID               string            `json:"uuid" yaml:"uuid"`
-	Name               string            `json:"name" yaml:"name"`
-	ExternalIDs        map[string]string `json:"external_ids" yaml:"external_ids"`
-	Ports              []string          `json:"ports" yaml:"ports"`
-	StaticRoutes       []string          `json:"static_routes" yaml:"static_routes"`
-	NAT                []string          `json:"nat" yaml:"nat"`
-	LoadBalancer       []string          `json:"load_balancer" yaml:"load_balancer"`
-	Policies           []string          `json:"policies" yaml:"policies"`
+	UUID         string            `json:"uuid" yaml:"uuid"`
+	Name         string            `json:"name" yaml:"name"`
+	ExternalIDs  map[string]string `json:"external_ids" yaml:"external_ids"`
+	Ports        []string          `json:"ports" yaml:"ports"`
+	StaticRoutes []string          `json:"static_routes" yaml:"static_routes"`
+	NAT          []string          `json:"nat" yaml:"nat"`
+	LoadBalancer []string          `json:"load_balancer" yaml:"load_balancer"`
+	Policies     []string          `json:"policies" yaml:"policies"`
 }
 
 // GetLogicalRouters returns a list of OVN logical routers from the Northbound database
@@ -1689,4 +1697,57 @@ func GetExporterVersion() string {
 // SetPollInterval sets exporter's polling interval.
 func (e *Exporter) SetPollInterval(i int64) {
 	e.pollInterval = i
+}
+
+// DefaultComponents lists the OVN daemons probed through their local control
+// sockets, pid and log files. These probes only work when the exporter runs
+// next to the daemon.
+var DefaultComponents = []string{
+	"ovsdb-server-southbound",
+	"ovsdb-server-northbound",
+	"ovn-northd",
+}
+
+// ParseComponents turns a comma separated list into component names. An empty
+// list is valid: it disables every local probe, which a topology-only exporter
+// reaching the databases over TCP needs so that ovn_up and the failed request
+// counter are not driven by probes that can never succeed.
+func ParseComponents(s string) ([]string, error) {
+	components := []string{}
+	for _, c := range strings.Split(s, ",") {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		if !slices.Contains(DefaultComponents, c) {
+			return nil, fmt.Errorf("unsupported component %q, supported: %s", c, strings.Join(DefaultComponents, ", "))
+		}
+		if !slices.Contains(components, c) {
+			components = append(components, c)
+		}
+	}
+	return components, nil
+}
+
+// SetComponents selects the local components to probe.
+func (e *Exporter) SetComponents(components []string) {
+	e.components = append([]string(nil), components...)
+}
+
+// SetCollectTopology toggles the NB/SB table queries (chassis, logical
+// switches and routers, port bindings).
+func (e *Exporter) SetCollectTopology(enabled bool) {
+	e.collectTopology = enabled
+}
+
+// enabledComponents returns the candidates that are selected, keeping the
+// order of the candidates.
+func (e *Exporter) enabledComponents(candidates ...string) []string {
+	enabled := []string{}
+	for _, c := range candidates {
+		if slices.Contains(e.components, c) {
+			enabled = append(enabled, c)
+		}
+	}
+	return enabled
 }

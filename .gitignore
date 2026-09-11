@@ -9,4 +9,4 @@ dist/
 TODO
 /ovn-exporter
 CLAUDE.md
-.claude
+.claude/ovn_exporter

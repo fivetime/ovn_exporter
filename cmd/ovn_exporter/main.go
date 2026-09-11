@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
-	"github.com/go-kit/log/level"
 	ovn "github.com/Liquescent-Development/ovn_exporter/pkg/ovn_exporter"
+	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -20,6 +21,8 @@ func main() {
 	var pollInterval int
 	var isShowVersion bool
 	var logLevel string
+	var collectorComponents string
+	var collectorTopology bool
 	var databaseNorthboundName string
 	var databaseNorthboundSocketRemote string
 	var databaseNorthboundSocketControl string
@@ -48,6 +51,8 @@ func main() {
 	flag.IntVar(&pollInterval, "ovn.poll-interval", 15, "The minimum interval (in seconds) between collections from OVN server.")
 	flag.BoolVar(&isShowVersion, "version", false, "version information")
 	flag.StringVar(&logLevel, "log.level", "info", "logging severity level")
+	flag.StringVar(&collectorComponents, "collector.components", strings.Join(ovn.DefaultComponents, ","), "Comma separated local components to probe through control sockets, pid and log files. Empty disables local probes (use it when the databases are reached over TCP).")
+	flag.BoolVar(&collectorTopology, "collector.topology", true, "Query the NB/SB tables for chassis, logical switch/router and port binding metrics.")
 
 	flag.StringVar(&databaseNorthboundName, "database.northbound.name", "OVN_Northbound", "The name of OVN NB (northbound) db.")
 	flag.StringVar(&databaseNorthboundSocketRemote, "database.northbound.socket.remote", "unix:/run/openvswitch/ovnnb_db.sock", "JSON-RPC unix socket to OVN NB db.")
@@ -118,6 +123,17 @@ func main() {
 		)
 		os.Exit(1)
 	}
+
+	components, err := ovn.ParseComponents(collectorComponents)
+	if err != nil {
+		level.Error(logger).Log(
+			"msg", "invalid -collector.components",
+			"error", err.Error(),
+		)
+		os.Exit(1)
+	}
+	exporter.SetComponents(components)
+	exporter.SetCollectTopology(collectorTopology)
 
 	exporter.Client.Database.Northbound.Name = databaseNorthboundName
 	exporter.Client.Database.Northbound.Socket.Remote = databaseNorthboundSocketRemote
