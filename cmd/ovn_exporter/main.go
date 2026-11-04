@@ -10,6 +10,7 @@ import (
 
 	ovn "github.com/Liquescent-Development/ovn_exporter/pkg/ovn_exporter"
 	"github.com/go-kit/log/level"
+	"github.com/greenpau/ovsdb"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -24,6 +25,7 @@ func main() {
 	var collectorComponents string
 	var collectorTopology bool
 	var databaseNorthboundName string
+	var databaseSSLPrivateKey, databaseSSLCertificate, databaseSSLCACert string
 	var databaseNorthboundSocketRemote string
 	var databaseNorthboundSocketControl string
 	var databaseNorthboundFileDataPath string
@@ -53,6 +55,10 @@ func main() {
 	flag.StringVar(&logLevel, "log.level", "info", "logging severity level")
 	flag.StringVar(&collectorComponents, "collector.components", strings.Join(ovn.DefaultComponents, ","), "Comma separated local components to probe through control sockets, pid and log files. Empty disables local probes (use it when the databases are reached over TCP).")
 	flag.BoolVar(&collectorTopology, "collector.topology", true, "Query the NB/SB tables for chassis, logical switch/router and port binding metrics.")
+
+	flag.StringVar(&databaseSSLPrivateKey, "database.ssl.private-key", "", "Client private key (PEM) for ssl: sockets. Read on every connection.")
+	flag.StringVar(&databaseSSLCertificate, "database.ssl.certificate", "", "Client certificate (PEM) for ssl: sockets. Read on every connection.")
+	flag.StringVar(&databaseSSLCACert, "database.ssl.ca-cert", "", "CA certificate (PEM) to verify the servers of ssl: sockets. Read on every connection.")
 
 	flag.StringVar(&databaseNorthboundName, "database.northbound.name", "OVN_Northbound", "The name of OVN NB (northbound) db.")
 	flag.StringVar(&databaseNorthboundSocketRemote, "database.northbound.socket.remote", "unix:/run/openvswitch/ovnnb_db.sock", "JSON-RPC unix socket to OVN NB db.")
@@ -134,6 +140,20 @@ func main() {
 	}
 	exporter.SetComponents(components)
 	exporter.SetCollectTopology(collectorTopology)
+
+	if databaseSSLPrivateKey != "" || databaseSSLCertificate != "" || databaseSSLCACert != "" {
+		if databaseSSLPrivateKey == "" || databaseSSLCertificate == "" || databaseSSLCACert == "" {
+			level.Error(logger).Log(
+				"msg", "-database.ssl.private-key, -database.ssl.certificate and -database.ssl.ca-cert must be set together",
+			)
+			os.Exit(1)
+		}
+		exporter.Client.TLS = &ovsdb.TLSOptions{
+			PrivateKey:  databaseSSLPrivateKey,
+			Certificate: databaseSSLCertificate,
+			CACert:      databaseSSLCACert,
+		}
+	}
 
 	exporter.Client.Database.Northbound.Name = databaseNorthboundName
 	exporter.Client.Database.Northbound.Socket.Remote = databaseNorthboundSocketRemote
